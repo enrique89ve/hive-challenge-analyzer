@@ -121,6 +121,8 @@ function App() {
             dateRange={dateRange}
             onDateRangeChange={handleDateRangeChange}
             disabled={result.status === 'loading'}
+            onRefresh={fetchData}
+            isLoading={result.status === 'loading'}
           />
 
           <div className="space-y-2">
