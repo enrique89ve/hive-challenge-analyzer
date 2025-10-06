@@ -1,10 +1,28 @@
-import { isWithinInterval, parseISO, format } from "date-fns";
+import { isWithinInterval, parseISO } from "date-fns";
 import type {
   User,
   DateRange,
   ProgressCallback,
   ChallengeAnalysis,
+  PowerUpTransaction,
 } from "../types/hive";
+
+// Formatear fecha en UTC sin depender de la zona horaria del navegador
+const formatUTC = (date: Date, formatStr: string): string => {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const hours = String(date.getUTCHours()).padStart(2, "0");
+  const minutes = String(date.getUTCMinutes()).padStart(2, "0");
+  const seconds = String(date.getUTCSeconds()).padStart(2, "0");
+
+  // Formato: "yyyy-MM-dd HH:mm:ss 'UTC'"
+  if (formatStr === "yyyy-MM-dd HH:mm:ss 'UTC'") {
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds} UTC`;
+  }
+
+  return date.toISOString();
+};
 
 // Cuentas a ignorar (bots y cuentas del sistema)
 const IGNORED_ACCOUNTS = new Set([
@@ -22,6 +40,85 @@ const IGNORED_ACCOUNTS = new Set([
   "spaminator",
   "cheetah",
 ]);
+
+// Extensiones de imagen válidas
+const VALID_IMAGE_EXTENSIONS = new Set([
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".gif",
+  ".webp",
+  ".bmp",
+  ".svg",
+  ".avif",
+  ".tiff",
+  ".tif",
+  ".ico",
+]);
+
+// Dominios de confianza para imágenes (no requieren extensión específica)
+const TRUSTED_IMAGE_DOMAINS = new Set([
+  "cdn.liketu.com",
+  "images.ecency.com",
+  "images.hive.blog",
+  "cdn.steemitimages.com",
+  "files.peakd.com",
+  "static.peakd.com",
+]);
+
+// Función para validar si una URL es una imagen válida
+function isValidImageUrl(url: string): boolean {
+  try {
+    // Verificar que sea una URL válida
+    const urlObj = new URL(url);
+
+    // Verificar si es un dominio de confianza (Liketu, Ecency, etc.)
+    if (TRUSTED_IMAGE_DOMAINS.has(urlObj.hostname.toLowerCase())) {
+      return true;
+    }
+
+    // Extraer la extensión del pathname
+    const pathname = urlObj.pathname.toLowerCase();
+    const lastDotIndex = pathname.lastIndexOf(".");
+
+    if (lastDotIndex === -1) {
+      return false; // No hay extensión
+    }
+
+    const extension = pathname.substring(lastDotIndex);
+
+    // Verificar si la extensión está en la lista de extensiones válidas
+    return VALID_IMAGE_EXTENSIONS.has(extension);
+  } catch (error) {
+    // Si no es una URL válida, retornar falso
+    console.warn(`⚠️ URL inválida: ${url}`, error);
+    return false;
+  }
+}
+
+// Función para filtrar y validar imágenes en un array
+function getValidImages(images: string[]): string[] {
+  if (!Array.isArray(images)) {
+    return [];
+  }
+
+  const validImages = images.filter((img) => {
+    if (typeof img !== "string" || img.trim() === "") {
+      return false;
+    }
+
+    const isValid = isValidImageUrl(img.trim());
+    if (!isValid) {
+      console.log(`🚫 Imagen inválida descartada: ${img}`);
+    } else {
+      console.log(`✅ Imagen válida: ${img}`);
+    }
+
+    return isValid;
+  });
+
+  return validImages;
+}
 
 // Interfaces para la respuesta de la API de Syncad
 interface SyncadOperationValue {
@@ -97,20 +194,33 @@ const enum ApiConfig {
 interface PowerUpResult {
   readonly hasPowerUp: boolean;
   readonly powerUpDate?: string;
+  readonly powerUpAmount?: string;
+  readonly powerUpTxId?: string;
+  readonly powerUpTransactions?: PowerUpTransaction[]; // Todos los power ups encontrados
+  readonly totalPowerUp?: string; // Suma total
 }
 
 // Función para verificar si un usuario hizo power up en el rango de fechas usando la API de Syncad
 async function hasPowerUpInRange(
   username: string,
-  dateRange: DateRange
+  dateRange: DateRange,
+  minPowerUp: number = 0
 ): Promise<PowerUpResult> {
   try {
     console.log(
       `🔍 Verificando power up para ${username} usando API Syncad...`
     );
+    console.log(`📅 Rango de búsqueda UTC:`, {
+      start: dateRange.startDate.toISOString(),
+      end: dateRange.endDate.toISOString(),
+      startUnix: dateRange.startDate.getTime(),
+      endUnix: dateRange.endDate.getTime(),
+    });
 
     let page = 1;
     let hasNext = true;
+    const validPowerUps: PowerUpTransaction[] = [];
+    const processedTxIds = new Set<string>(); // Para evitar duplicados
 
     while (hasNext) {
       // Para la primera página no agregamos el parámetro page
@@ -133,38 +243,64 @@ async function hasPowerUpInRange(
         `📊 Página ${page}: ${data.operations_result.length} operaciones encontradas para ${username}`
       );
 
-      // Buscar operaciones transfer_to_vesting dentro del rango
+      // Buscar TODAS las operaciones transfer_to_vesting dentro del rango
       for (const operation of data.operations_result) {
         if (operation.op_type_id === OperationType.TRANSFER_TO_VESTING) {
-          // transfer_to_vesting
           // Asegurar que el timestamp tenga la Z para UTC
           const timestampUTC = operation.timestamp.endsWith("Z")
             ? operation.timestamp
             : operation.timestamp + "Z";
           const opDate = parseISO(timestampUTC);
 
-          const formattedOpDate = format(opDate, "yyyy-MM-dd HH:mm:ss 'UTC'");
+          const formattedOpDate = formatUTC(
+            opDate,
+            "yyyy-MM-dd HH:mm:ss 'UTC'"
+          );
           const amount = operation.op.value.hive_vested?.amount || "N/A";
-          console.log(
-            `⚡ ${username} - Power Up encontrado: ${formattedOpDate} (${amount})`
-          );
-          console.log(
-            `📅 Rango: ${format(
-              dateRange.startDate,
-              "yyyy-MM-dd HH:mm:ss 'UTC'"
-            )} - ${format(dateRange.endDate, "yyyy-MM-dd HH:mm:ss 'UTC'")}`
-          );
 
+          // Extraer el valor numérico del amount y dividir entre 1000 para obtener HIVE
+          const amountValue = parseFloat(amount) / 1000;
+          const amountFormatted = amountValue.toFixed(3);
+
+          // Validar que esté dentro del rango de fechas
           if (
             isWithinInterval(opDate, {
               start: dateRange.startDate,
               end: dateRange.endDate,
             })
           ) {
-            console.log(`✅ ${username} - Power Up VÁLIDO en rango!`);
-            return { hasPowerUp: true, powerUpDate: formattedOpDate };
-          } else {
-            console.log(`❌ ${username} - Power Up fuera del rango`);
+            // Verificar si el txId ya fue procesado (evitar duplicados)
+            if (processedTxIds.has(operation.trx_id)) {
+              console.log(
+                `⚠️ ${username} - Transaction duplicada ignorada: ${operation.trx_id}`
+              );
+              continue;
+            }
+
+            console.log(`⚡ ${username} - Power Up encontrado:`, {
+              fecha: formattedOpDate,
+              fechaISO: opDate.toISOString(),
+              unix: opDate.getTime(),
+              monto: `${amountFormatted} HIVE`,
+              txId: operation.trx_id,
+            });
+
+            // Validar cantidad mínima individual
+            if (minPowerUp > 0 && amountValue < minPowerUp) {
+              console.log(
+                `⚠️ ${username} - Power Up de ${amountFormatted} HIVE es menor al mínimo (${minPowerUp} HIVE), pero se incluirá en el total`
+              );
+            }
+
+            // Marcar txId como procesado
+            processedTxIds.add(operation.trx_id);
+
+            // Agregar a la lista de power ups válidos
+            validPowerUps.push({
+              date: formattedOpDate,
+              amount: amountFormatted,
+              txId: operation.trx_id,
+            });
           }
         }
       }
@@ -172,16 +308,67 @@ async function hasPowerUpInRange(
       // Verificar si hay más páginas basado en total_pages
       hasNext = page < data.total_pages;
       if (hasNext) {
-        page = page + 1;
+        page++;
       }
 
-      // Límite de seguridad para evitar bucles infinitos
+      // Protección contra loops infinitos
       if (page > ApiConfig.MAX_PAGES) {
-        console.warn(`⚠️ Límite de páginas alcanzado para ${username}`);
+        console.warn(
+          `⚠️ Se alcanzó el límite de ${ApiConfig.MAX_PAGES} páginas para ${username}`
+        );
         break;
       }
     }
 
+    // Log de transacciones procesadas
+    console.log(
+      `📊 ${username} - Total transacciones únicas procesadas: ${validPowerUps.length}`
+    );
+
+    // Si encontramos power ups, calcular el total
+    if (validPowerUps.length > 0) {
+      const totalAmount = validPowerUps.reduce((sum, pu) => {
+        return sum + parseFloat(pu.amount);
+      }, 0);
+
+      console.log(
+        `✅ ${username} - ${
+          validPowerUps.length
+        } Power Up(s) encontrado(s). Total: ${totalAmount.toFixed(3)} HIVE`
+      );
+      console.log(
+        `📅 Rango: ${formatUTC(
+          dateRange.startDate,
+          "yyyy-MM-dd HH:mm:ss 'UTC'"
+        )} - ${formatUTC(dateRange.endDate, "yyyy-MM-dd HH:mm:ss 'UTC'")}`
+      );
+      console.log(`💰 Filtro mínimo: ${minPowerUp} HIVE`);
+
+      // Validar que el total cumpla con el mínimo
+      if (minPowerUp > 0 && totalAmount < minPowerUp) {
+        console.log(
+          `❌ ${username} - Total de ${totalAmount.toFixed(
+            3
+          )} HIVE es menor al mínimo requerido (${minPowerUp} HIVE)`
+        );
+        return { hasPowerUp: false };
+      }
+
+      console.log(`✅ ${username} - Power Up VÁLIDO! Total cumple el mínimo.`);
+
+      return {
+        hasPowerUp: true,
+        powerUpDate: validPowerUps[0].date, // Primera transacción
+        powerUpAmount: validPowerUps[0].amount, // Primera transacción (ya está dividido)
+        powerUpTxId: validPowerUps[0].txId, // Primera transacción
+        powerUpTransactions: validPowerUps, // Todas las transacciones (ya divididas)
+        totalPowerUp: totalAmount.toFixed(3), // Total sumado
+      };
+    }
+
+    console.log(
+      `🚫 ${username} - No se encontró Power Up en el rango especificado`
+    );
     console.log(
       `🚫 ${username} - No se encontró Power Up en el rango especificado`
     );
@@ -236,7 +423,8 @@ export async function getChallengeParticipants(
   author: string,
   permlink: string,
   dateRange: DateRange,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
+  minPowerUp: number = 10
 ): Promise<ChallengeAnalysis> {
   try {
     const comments = await getComments(author, permlink);
@@ -246,10 +434,10 @@ export async function getChallengeParticipants(
 
     console.log(`📝 Analizando ${comments.length} comentarios...`);
     console.log(
-      `📅 Rango de fechas: ${format(
+      `📅 Rango de fechas: ${formatUTC(
         dateRange.startDate,
         "yyyy-MM-dd HH:mm:ss 'UTC'"
-      )} - ${format(dateRange.endDate, "yyyy-MM-dd HH:mm:ss 'UTC'")}`
+      )} - ${formatUTC(dateRange.endDate, "yyyy-MM-dd HH:mm:ss 'UTC'")}`
     );
 
     for (let i = 0; i < comments.length; i++) {
@@ -272,30 +460,43 @@ export async function getChallengeParticipants(
         );
         const { image } = metadata;
 
-        const hasImages = Array.isArray(image) && image.length >= 1;
+        // Validar imágenes: verificar que sean URLs válidas con extensiones de imagen
+        const validImages = getValidImages(image || []);
+        const hasImages = validImages.length >= 1;
         let hasPowerUp = false;
         let powerUpDate: string | undefined;
         let reason = "";
 
         if (hasImages) {
           console.log(
-            `🖼️ ${comment.author} - Comentario con ${image.length} imagen(es)`
+            `🖼️ ${comment.author} - Comentario con ${
+              validImages.length
+            } imagen(es) válida(s) de ${(image || []).length} total(es)`
           );
 
           // Verificar si hizo power up en el rango de fechas usando API Syncad
           const powerUpResult = await hasPowerUpInRange(
             comment.author,
-            dateRange
+            dateRange,
+            minPowerUp
           );
           hasPowerUp = powerUpResult.hasPowerUp;
           powerUpDate = powerUpResult.powerUpDate;
+          const powerUpAmount = powerUpResult.powerUpAmount;
+          const powerUpTxId = powerUpResult.powerUpTxId;
+          const powerUpTransactions = powerUpResult.powerUpTransactions;
+          const totalPowerUp = powerUpResult.totalPowerUp;
 
           if (hasPowerUp) {
             console.log(`🎉 ${comment.author} - CUMPLE TODOS LOS REQUISITOS!`);
             validUsers.push({
               name: comment.author,
-              images: image,
+              images: validImages,
               powerUpDate,
+              powerUpAmount,
+              powerUpTxId,
+              powerUpTransactions,
+              totalPowerUp,
               hasImages: true,
               hasPowerUp: true,
             });
@@ -304,14 +505,14 @@ export async function getChallengeParticipants(
             console.log(`❌ ${comment.author} - ${reason}`);
             invalidUsers.push({
               name: comment.author,
-              images: image,
+              images: validImages,
               hasImages: true,
               hasPowerUp: false,
               reason,
             });
           }
         } else {
-          reason = "No incluye imágenes en el comentario";
+          reason = "No incluye imágenes válidas en el comentario";
           console.log(`📷 ${comment.author} - ${reason}`);
           invalidUsers.push({
             name: comment.author,

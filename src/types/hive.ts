@@ -2,9 +2,19 @@ export interface User {
   readonly name: string;
   readonly images: string[];
   readonly powerUpDate?: string;
+  readonly powerUpAmount?: string;
+  readonly powerUpTxId?: string; // ID de transacción para el Power Up
+  readonly powerUpTransactions?: PowerUpTransaction[]; // Array de todas las transacciones
+  readonly totalPowerUp?: string; // Suma total de todos los power ups
   readonly hasImages: boolean;
   readonly hasPowerUp: boolean;
   readonly reason?: string; // Razón por la que no cumple
+}
+
+export interface PowerUpTransaction {
+  readonly date: string;
+  readonly amount: string;
+  readonly txId: string;
 }
 
 export interface ChallengeAnalysis {
@@ -29,6 +39,16 @@ export interface SearchParams {
   readonly author: string;
   readonly permlink: string;
   readonly dateRange: DateRange;
+  readonly minPowerUp?: number; // Cantidad mínima de HIVE para Power Up
+}
+
+export interface PostInfo {
+  readonly author: string;
+  readonly permlink: string;
+}
+
+export interface FilterOptions {
+  readonly minPowerUp: number;
 }
 
 export interface ProgressCallback {
