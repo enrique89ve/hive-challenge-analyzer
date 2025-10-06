@@ -110,12 +110,24 @@ const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({
     },
     {
       label: "Hive Power Day",
-      description: "1-3 Sept 2025 (evento específico)",
+      description: "Día 1 al 2 del mes actual (24 horas)",
       icon: <Zap className="w-3 h-3" />,
-      getRange: () => ({
-        startDate: new Date("2025-09-01T00:00:00Z"),
-        endDate: new Date("2025-09-03T23:59:59Z")
-      })
+      getRange: () => {
+        const now = new Date();
+        const currentYear = now.getUTCFullYear();
+        const currentMonth = now.getUTCMonth(); // 0-indexed (0 = enero, 9 = octubre)
+
+        // Día 1 del mes actual a las 00:00:00 UTC
+        const startDate = new Date(Date.UTC(currentYear, currentMonth, 1, 0, 0, 0, 0));
+
+        // Día 2 del mes actual a las 00:00:00 UTC (24 horas después)
+        const endDate = new Date(Date.UTC(currentYear, currentMonth, 2, 0, 0, 0, 0));
+
+        return {
+          startDate,
+          endDate
+        };
+      }
     }
   ];
 

@@ -24,6 +24,18 @@ const formatUTC = (date: Date, formatStr: string): string => {
   return date.toISOString();
 };
 
+// Formatear fecha para la API HAFAH (sin sufijo 'UTC', formato: YYYY-MM-DD HH:MI:SS)
+const formatForHafahApi = (date: Date): string => {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  const hours = String(date.getUTCHours()).padStart(2, "0");
+  const minutes = String(date.getUTCMinutes()).padStart(2, "0");
+  const seconds = String(date.getUTCSeconds()).padStart(2, "0");
+
+  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+};
+
 // Cuentas a ignorar (bots y cuentas del sistema)
 const IGNORED_ACCOUNTS = new Set([
   "hivebuzz",
@@ -189,6 +201,7 @@ const enum ApiConfig {
   MAX_PAGES = 50,
   PAGE_SIZE = 100,
   DATA_SIZE_LIMIT = 200000,
+  MARGIN_HOURS = 10, // Margen de seguridad en horas antes/después del rango
 }
 
 interface PowerUpResult {
@@ -210,24 +223,72 @@ async function hasPowerUpInRange(
     console.log(
       `🔍 Verificando power up para ${username} usando API Syncad...`
     );
-    console.log(`📅 Rango de búsqueda UTC:`, {
+    console.log(`📅 Rango de búsqueda UTC (exacto):`, {
       start: dateRange.startDate.toISOString(),
       end: dateRange.endDate.toISOString(),
       startUnix: dateRange.startDate.getTime(),
       endUnix: dateRange.endDate.getTime(),
     });
 
-    let page = 1;
-    let hasNext = true;
+    // Crear rango extendido con márgenes de 10 horas para la API
+    const marginMs = ApiConfig.MARGIN_HOURS * 60 * 60 * 1000; // 10 horas en milisegundos
+    const fromBlockDate = new Date(dateRange.startDate.getTime() - marginMs);
+    const toBlockDate = new Date(dateRange.endDate.getTime() + marginMs);
+
+    const fromBlock = formatForHafahApi(fromBlockDate);
+    const toBlock = formatForHafahApi(toBlockDate);
+
+    console.log(`🔎 Rango API con margen de ${ApiConfig.MARGIN_HOURS}h:`, {
+      fromBlock,
+      toBlock,
+      margin: `±${ApiConfig.MARGIN_HOURS} horas`,
+    });
+
+    // Construir URL con filtros de rango de fecha
+    const baseParams = `participation-mode=all&operation-types=${
+      OperationType.TRANSFER_TO_VESTING
+    }&page-size=${ApiConfig.PAGE_SIZE}&data-size-limit=${
+      ApiConfig.DATA_SIZE_LIMIT
+    }&from-block=${encodeURIComponent(fromBlock)}&to-block=${encodeURIComponent(
+      toBlock
+    )}`;
+    const initialUrl = `https://api.syncad.com/hafah-api/accounts/${username}/operations?${baseParams}`;
+
+    console.log(`📡 Obteniendo información de paginación para ${username}...`);
+
+    const initialResponse = await fetch(initialUrl);
+    if (!initialResponse.ok) {
+      throw new ApiError(
+        `Error HTTP: ${initialResponse.status}`,
+        initialResponse.status,
+        initialUrl
+      );
+    }
+
+    const initialData: SyncadResponse = await initialResponse.json();
+    const totalPages = initialData.total_pages;
+
+    console.log(`📄 Total de páginas disponibles: ${totalPages}`);
+    console.log(
+      `🔄 Comenzando navegación desde la ÚLTIMA página (${totalPages}) hacia la primera`
+    );
+
     const validPowerUps: PowerUpTransaction[] = [];
     const processedTxIds = new Set<string>(); // Para evitar duplicados
+    let shouldContinue = true;
 
-    while (hasNext) {
-      // Para la primera página no agregamos el parámetro page
-      const pageParam = page === 1 ? "" : `&page=${page}`;
-      const url = `https://api.syncad.com/hafah-api/accounts/${username}/operations?participation-mode=all&operation-types=${OperationType.TRANSFER_TO_VESTING}&page-size=${ApiConfig.PAGE_SIZE}&data-size-limit=${ApiConfig.DATA_SIZE_LIMIT}${pageParam}`;
+    // Comenzamos desde la última página y vamos hacia atrás
+    for (
+      let currentPage = totalPages;
+      currentPage >= 1 && shouldContinue;
+      currentPage--
+    ) {
+      const pageParam = currentPage === 1 ? "" : `&page=${currentPage}`;
+      const url = `https://api.syncad.com/hafah-api/accounts/${username}/operations?${baseParams}${pageParam}`;
 
-      console.log(`📡 Consultando página ${page} para ${username}...`);
+      console.log(
+        `📡 ⬅️ Consultando página ${currentPage}/${totalPages} (navegando hacia atrás) para ${username}...`
+      );
 
       const response = await fetch(url);
       if (!response.ok) {
@@ -240,7 +301,7 @@ async function hasPowerUpInRange(
 
       const data: SyncadResponse = await response.json();
       console.log(
-        `📊 Página ${page}: ${data.operations_result.length} operaciones encontradas para ${username}`
+        `📊 Página ${currentPage}/${totalPages}: ${data.operations_result.length} operaciones encontradas para ${username}`
       );
 
       // Buscar TODAS las operaciones transfer_to_vesting dentro del rango
@@ -262,7 +323,19 @@ async function hasPowerUpInRange(
           const amountValue = parseFloat(amount) / 1000;
           const amountFormatted = amountValue.toFixed(3);
 
-          // Validar que esté dentro del rango de fechas
+          // Early exit: Si encontramos una operación ANTERIOR al rango extendido,
+          // podemos detener la búsqueda porque las páginas anteriores serán aún más antiguas
+          // Usamos fromBlockDate (con margen) para el early exit
+          if (opDate < fromBlockDate) {
+            console.log(
+              `⏸️ ${username} - Operación anterior al rango extendido encontrada (${formattedOpDate}). Deteniendo búsqueda en página ${currentPage}.`
+            );
+            shouldContinue = false;
+            break;
+          }
+
+          // Validar que esté dentro del rango de fechas EXACTO (sin márgenes)
+          // El margen solo se usa para el filtrado de la API, la validación es precisa
           if (
             isWithinInterval(opDate, {
               start: dateRange.startDate,
@@ -305,16 +378,10 @@ async function hasPowerUpInRange(
         }
       }
 
-      // Verificar si hay más páginas basado en total_pages
-      hasNext = page < data.total_pages;
-      if (hasNext) {
-        page++;
-      }
-
       // Protección contra loops infinitos
-      if (page > ApiConfig.MAX_PAGES) {
+      if (totalPages - currentPage + 1 > ApiConfig.MAX_PAGES) {
         console.warn(
-          `⚠️ Se alcanzó el límite de ${ApiConfig.MAX_PAGES} páginas para ${username}`
+          `⚠️ Se alcanzó el límite de ${ApiConfig.MAX_PAGES} páginas procesadas para ${username}`
         );
         break;
       }
