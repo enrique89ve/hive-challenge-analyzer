@@ -52,7 +52,8 @@ function App() {
     permlink: ""
   });
   const [filters, setFilters] = useState<FilterOptions>({
-    minPowerUp: 10
+    minPowerUp: 10,
+    requireImages: false
   });
   const [canAnalyze, setCanAnalyze] = useState<boolean>(false);
 
@@ -78,7 +79,8 @@ function App() {
         (current, total) => {
           setProgress({ current, total });
         },
-        filters.minPowerUp
+        filters.minPowerUp,
+        filters.requireImages
       );
 
       setResult({

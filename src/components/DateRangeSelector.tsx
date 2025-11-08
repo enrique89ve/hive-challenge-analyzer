@@ -2,30 +2,13 @@
 import { Calendar, Clock, Zap, CalendarDays, Play } from 'lucide-react';
 import { subDays, subHours, startOfDay, endOfDay } from 'date-fns';
 import type { DateRange } from '../types/hive';
+import { formatUTC, formatDateForInput } from '../utils/dateFormatters';
 
 interface DateRangeSelectorProps {
   readonly dateRange: DateRange;
   readonly onDateRangeChange: (dateRange: DateRange) => void;
   readonly disabled?: boolean;
 }
-
-// Formatear fecha en UTC sin depender de la zona horaria del navegador
-const formatUTC = (date: Date, formatStr: string): string => {
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-  const year = date.getUTCFullYear();
-  const month = months[date.getUTCMonth()];
-  const day = date.getUTCDate();
-  const hours = String(date.getUTCHours()).padStart(2, '0');
-  const minutes = String(date.getUTCMinutes()).padStart(2, '0');
-
-  // Formato: "MMM d, yyyy HH:mm 'UTC'"
-  if (formatStr === "MMM d, yyyy HH:mm 'UTC'") {
-    return `${month} ${day}, ${year} ${hours}:${minutes} UTC`;
-  }
-
-  return date.toISOString();
-};
 
 interface DatePreset {
   readonly label: string;
@@ -173,25 +156,6 @@ const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({
 
   const handleApplyChanges = () => {
     onDateRangeChange(localDateRange);
-  };
-
-  const formatDateForInput = (date: Date) => {
-    if (!date || isNaN(date.getTime())) {
-      console.warn('Fecha inválida pasada a formatDateForInput:', date);
-      return '';
-    }
-    try {
-      const year = date.getUTCFullYear();
-      const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-      const day = String(date.getUTCDate()).padStart(2, '0');
-      const hours = String(date.getUTCHours()).padStart(2, '0');
-      const minutes = String(date.getUTCMinutes()).padStart(2, '0');
-
-      return `${year}-${month}-${day}T${hours}:${minutes}`;
-    } catch (error) {
-      console.error('Error formateando fecha:', error, date);
-      return '';
-    }
   };
 
   const getDurationText = () => {

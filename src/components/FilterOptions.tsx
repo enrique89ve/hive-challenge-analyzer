@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Filter } from 'lucide-react';
+import { Filter, Image, ImageOff } from 'lucide-react';
 import type { FilterOptions } from '../types/hive';
 
 interface FilterOptionsProps {
@@ -18,13 +18,20 @@ export default function FilterOptionsComponent({
     const handleMinPowerUpChange = (value: string): void => {
         setLocalMinPowerUp(value);
 
-        // Validar que sea un número válido
         const numValue = parseFloat(value);
         if (!isNaN(numValue) && numValue >= 0) {
             onFiltersChange({
+                ...filters,
                 minPowerUp: numValue
             });
         }
+    };
+
+    const handleRequireImagesChange = (value: boolean): void => {
+        onFiltersChange({
+            ...filters,
+            requireImages: value
+        });
     };
 
     return (
@@ -86,6 +93,47 @@ export default function FilterOptionsComponent({
                     ✓ Filtrando Power Ups ≥ <span className="text-terminal-green font-bold">{localMinPowerUp} HIVE</span>
                 </div>
             )}
+
+            <div className="space-y-2 border-t border-terminal-green/20 pt-4">
+                <label className="block text-sm text-terminal-green/90">
+                    Requisito de Imágenes:
+                </label>
+                <div className="flex gap-2">
+                    <button
+                        onClick={() => handleRequireImagesChange(false)}
+                        disabled={disabled}
+                        className={`flex-1 px-3 py-2 text-sm font-mono rounded transition-all border ${
+                            !filters.requireImages
+                                ? 'bg-terminal-green/20 border-terminal-green text-terminal-green'
+                                : 'bg-terminal-bg border-terminal-green/30 text-terminal-green/50 hover:border-terminal-green/50'
+                        } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                        <div className="flex items-center justify-center gap-2">
+                            <ImageOff className="w-4 h-4" />
+                            <span>Sin Imágenes</span>
+                        </div>
+                    </button>
+                    <button
+                        onClick={() => handleRequireImagesChange(true)}
+                        disabled={disabled}
+                        className={`flex-1 px-3 py-2 text-sm font-mono rounded transition-all border ${
+                            filters.requireImages
+                                ? 'bg-terminal-green/20 border-terminal-green text-terminal-green'
+                                : 'bg-terminal-bg border-terminal-green/30 text-terminal-green/50 hover:border-terminal-green/50'
+                        } disabled:opacity-50 disabled:cursor-not-allowed`}
+                    >
+                        <div className="flex items-center justify-center gap-2">
+                            <Image className="w-4 h-4" />
+                            <span>Con Imágenes</span>
+                        </div>
+                    </button>
+                </div>
+                <div className="text-xs text-terminal-green/40 italic">
+                    {filters.requireImages
+                        ? '📸 Solo usuarios que comentaron CON imágenes válidas'
+                        : '⚡ Acepta usuarios que solo hicieron Power Up (sin imágenes)'}
+                </div>
+            </div>
         </div>
     );
 }
