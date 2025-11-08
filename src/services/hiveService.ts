@@ -5,36 +5,11 @@ import type {
   ProgressCallback,
   ChallengeAnalysis,
   PowerUpTransaction,
+  ExtendedDateRange,
+  PowerUpPageResult,
+  SyncadApiParams,
 } from "../types/hive";
-
-// Formatear fecha en UTC sin depender de la zona horaria del navegador
-const formatUTC = (date: Date, formatStr: string): string => {
-  const year = date.getUTCFullYear();
-  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(date.getUTCDate()).padStart(2, "0");
-  const hours = String(date.getUTCHours()).padStart(2, "0");
-  const minutes = String(date.getUTCMinutes()).padStart(2, "0");
-  const seconds = String(date.getUTCSeconds()).padStart(2, "0");
-
-  // Formato: "yyyy-MM-dd HH:mm:ss 'UTC'"
-  if (formatStr === "yyyy-MM-dd HH:mm:ss 'UTC'") {
-    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds} UTC`;
-  }
-
-  return date.toISOString();
-};
-
-// Formatear fecha para la API HAFAH (sin sufijo 'UTC', formato: YYYY-MM-DD HH:MI:SS)
-const formatForHafahApi = (date: Date): string => {
-  const year = date.getUTCFullYear();
-  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(date.getUTCDate()).padStart(2, "0");
-  const hours = String(date.getUTCHours()).padStart(2, "0");
-  const minutes = String(date.getUTCMinutes()).padStart(2, "0");
-  const seconds = String(date.getUTCSeconds()).padStart(2, "0");
-
-  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
-};
+import { formatUTC, formatForHafahApi } from "../utils/dateFormatters";
 
 // Cuentas a ignorar (bots y cuentas del sistema)
 const IGNORED_ACCOUNTS = new Set([
@@ -213,7 +188,258 @@ interface PowerUpResult {
   readonly totalPowerUp?: string; // Suma total
 }
 
-// Función para verificar si un usuario hizo power up en el rango de fechas usando la API de Syncad
+/**
+ * Calcula el rango de fechas extendido con margen de seguridad para la API.
+ */
+const calculateExtendedDateRange = (
+  dateRange: DateRange
+): ExtendedDateRange => {
+  const marginMs = ApiConfig.MARGIN_HOURS * 60 * 60 * 1000;
+  const fromBlockDate = new Date(dateRange.startDate.getTime() - marginMs);
+  const toBlockDate = new Date(dateRange.endDate.getTime() + marginMs);
+
+  return {
+    fromBlock: formatForHafahApi(fromBlockDate),
+    toBlock: formatForHafahApi(toBlockDate),
+    fromBlockDate,
+    toBlockDate,
+  };
+};
+
+/**
+ * Construye los parámetros de la URL para la API de Syncad.
+ */
+const buildSyncadApiParams = (
+  username: string,
+  extendedRange: ExtendedDateRange
+): SyncadApiParams => {
+  const baseParams = `participation-mode=all&operation-types=${
+    OperationType.TRANSFER_TO_VESTING
+  }&page-size=${ApiConfig.PAGE_SIZE}&data-size-limit=${
+    ApiConfig.DATA_SIZE_LIMIT
+  }&from-block=${encodeURIComponent(
+    extendedRange.fromBlock
+  )}&to-block=${encodeURIComponent(extendedRange.toBlock)}`;
+
+  const baseUrl = `https://api.syncad.com/hafah-api/accounts/${username}/operations?${baseParams}`;
+
+  return { baseUrl, baseParams };
+};
+
+/**
+ * Obtiene el número total de páginas disponibles para un usuario.
+ */
+const fetchTotalPages = async (
+  username: string,
+  apiParams: SyncadApiParams
+): Promise<number> => {
+  console.log(`📡 Obteniendo información de paginación para ${username}...`);
+
+  const response = await fetch(apiParams.baseUrl);
+  if (!response.ok) {
+    throw new ApiError(
+      `Error HTTP: ${response.status}`,
+      response.status,
+      apiParams.baseUrl
+    );
+  }
+
+  const data: SyncadResponse = await response.json();
+  console.log(`📄 Total de páginas disponibles: ${data.total_pages}`);
+
+  return data.total_pages;
+};
+
+/**
+ * Procesa una operación individual de transfer_to_vesting.
+ */
+const processOperation = (
+  operation: SyncadOperation,
+  dateRange: DateRange,
+  extendedRange: ExtendedDateRange,
+  username: string,
+  processedTxIds: Set<string>
+): PowerUpTransaction | null => {
+  if (operation.op_type_id !== OperationType.TRANSFER_TO_VESTING) {
+    return null;
+  }
+
+  const timestampUTC = operation.timestamp.endsWith("Z")
+    ? operation.timestamp
+    : operation.timestamp + "Z";
+  const opDate = parseISO(timestampUTC);
+
+  const formattedOpDate = formatUTC(opDate, "yyyy-MM-dd HH:mm:ss 'UTC'");
+  const amount = operation.op.value.hive_vested?.amount || "N/A";
+  const amountValue = parseFloat(amount) / 1000;
+  const amountFormatted = amountValue.toFixed(3);
+
+  // Early exit: operación anterior al rango extendido
+  if (opDate < extendedRange.fromBlockDate) {
+    console.log(
+      `⏸️ ${username} - Operación anterior al rango extendido encontrada (${formattedOpDate}).`
+    );
+    return null;
+  }
+
+  // Validar que esté dentro del rango exacto
+  if (
+    !isWithinInterval(opDate, {
+      start: dateRange.startDate,
+      end: dateRange.endDate,
+    })
+  ) {
+    return null;
+  }
+
+  // Verificar duplicados
+  if (processedTxIds.has(operation.trx_id)) {
+    console.log(
+      `⚠️ ${username} - Transaction duplicada ignorada: ${operation.trx_id}`
+    );
+    return null;
+  }
+
+  console.log(`⚡ ${username} - Power Up encontrado:`, {
+    fecha: formattedOpDate,
+    fechaISO: opDate.toISOString(),
+    unix: opDate.getTime(),
+    monto: `${amountFormatted} HIVE`,
+    txId: operation.trx_id,
+  });
+
+  processedTxIds.add(operation.trx_id);
+
+  return {
+    date: formattedOpDate,
+    amount: amountFormatted,
+    txId: operation.trx_id,
+  };
+};
+
+/**
+ * Procesa una página de operaciones de la API.
+ */
+const processPowerUpPage = async (
+  username: string,
+  pageNumber: number,
+  totalPages: number,
+  apiParams: SyncadApiParams,
+  dateRange: DateRange,
+  extendedRange: ExtendedDateRange,
+  processedTxIds: Set<string>
+): Promise<PowerUpPageResult> => {
+  const pageParam = pageNumber === 1 ? "" : `&page=${pageNumber}`;
+  const url = `${apiParams.baseUrl.split("?")[0]}?${apiParams.baseParams}${pageParam}`;
+
+  console.log(
+    `📡 ⬅️ Consultando página ${pageNumber}/${totalPages} (navegando hacia atrás) para ${username}...`
+  );
+
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new ApiError(`Error HTTP: ${response.status}`, response.status, url);
+  }
+
+  const data: SyncadResponse = await response.json();
+  console.log(
+    `📊 Página ${pageNumber}/${totalPages}: ${data.operations_result.length} operaciones encontradas para ${username}`
+  );
+
+  const validPowerUps: PowerUpTransaction[] = [];
+  let shouldContinue = true;
+
+  for (const operation of data.operations_result) {
+    const powerUp = processOperation(
+      operation,
+      dateRange,
+      extendedRange,
+      username,
+      processedTxIds
+    );
+
+    if (powerUp === null && operation.op_type_id === OperationType.TRANSFER_TO_VESTING) {
+      const timestampUTC = operation.timestamp.endsWith("Z")
+        ? operation.timestamp
+        : operation.timestamp + "Z";
+      const opDate = parseISO(timestampUTC);
+
+      if (opDate < extendedRange.fromBlockDate) {
+        shouldContinue = false;
+        break;
+      }
+    }
+
+    if (powerUp) {
+      validPowerUps.push(powerUp);
+    }
+  }
+
+  return { validPowerUps, shouldContinue };
+};
+
+/**
+ * Calcula el resultado final basado en las transacciones encontradas.
+ */
+const calculatePowerUpResult = (
+  validPowerUps: PowerUpTransaction[],
+  minPowerUp: number,
+  username: string,
+  dateRange: DateRange
+): PowerUpResult => {
+  if (validPowerUps.length === 0) {
+    console.log(
+      `🚫 ${username} - No se encontró Power Up en el rango especificado`
+    );
+    return { hasPowerUp: false };
+  }
+
+  const totalAmount = validPowerUps.reduce((sum, pu) => {
+    return sum + parseFloat(pu.amount);
+  }, 0);
+
+  console.log(
+    `✅ ${username} - ${
+      validPowerUps.length
+    } Power Up(s) encontrado(s). Total: ${totalAmount.toFixed(3)} HIVE`
+  );
+  console.log(
+    `📅 Rango: ${formatUTC(
+      dateRange.startDate,
+      "yyyy-MM-dd HH:mm:ss 'UTC'"
+    )} - ${formatUTC(dateRange.endDate, "yyyy-MM-dd HH:mm:ss 'UTC'")}`
+  );
+  console.log(`💰 Filtro mínimo: ${minPowerUp} HIVE`);
+
+  if (minPowerUp > 0 && totalAmount < minPowerUp) {
+    console.log(
+      `❌ ${username} - Total de ${totalAmount.toFixed(
+        3
+      )} HIVE es menor al mínimo requerido (${minPowerUp} HIVE)`
+    );
+    return { hasPowerUp: false };
+  }
+
+  console.log(`✅ ${username} - Power Up VÁLIDO! Total cumple el mínimo.`);
+
+  return {
+    hasPowerUp: true,
+    powerUpDate: validPowerUps[0].date,
+    powerUpAmount: validPowerUps[0].amount,
+    powerUpTxId: validPowerUps[0].txId,
+    powerUpTransactions: validPowerUps,
+    totalPowerUp: totalAmount.toFixed(3),
+  };
+};
+
+/**
+ * Verifica si un usuario hizo power up en el rango de fechas usando la API de Syncad.
+ *
+ * @param username - Nombre de usuario de Hive
+ * @param dateRange - Rango de fechas exacto para verificar
+ * @param minPowerUp - Cantidad mínima de HIVE requerida (default: 0)
+ * @returns Resultado con información del Power Up si se encontró
+ */
 async function hasPowerUpInRange(
   username: string,
   dateRange: DateRange,
@@ -230,155 +456,42 @@ async function hasPowerUpInRange(
       endUnix: dateRange.endDate.getTime(),
     });
 
-    // Crear rango extendido con márgenes de 10 horas para la API
-    const marginMs = ApiConfig.MARGIN_HOURS * 60 * 60 * 1000; // 10 horas en milisegundos
-    const fromBlockDate = new Date(dateRange.startDate.getTime() - marginMs);
-    const toBlockDate = new Date(dateRange.endDate.getTime() + marginMs);
-
-    const fromBlock = formatForHafahApi(fromBlockDate);
-    const toBlock = formatForHafahApi(toBlockDate);
-
+    const extendedRange = calculateExtendedDateRange(dateRange);
     console.log(`🔎 Rango API con margen de ${ApiConfig.MARGIN_HOURS}h:`, {
-      fromBlock,
-      toBlock,
+      fromBlock: extendedRange.fromBlock,
+      toBlock: extendedRange.toBlock,
       margin: `±${ApiConfig.MARGIN_HOURS} horas`,
     });
 
-    // Construir URL con filtros de rango de fecha
-    const baseParams = `participation-mode=all&operation-types=${
-      OperationType.TRANSFER_TO_VESTING
-    }&page-size=${ApiConfig.PAGE_SIZE}&data-size-limit=${
-      ApiConfig.DATA_SIZE_LIMIT
-    }&from-block=${encodeURIComponent(fromBlock)}&to-block=${encodeURIComponent(
-      toBlock
-    )}`;
-    const initialUrl = `https://api.syncad.com/hafah-api/accounts/${username}/operations?${baseParams}`;
+    const apiParams = buildSyncadApiParams(username, extendedRange);
+    const totalPages = await fetchTotalPages(username, apiParams);
 
-    console.log(`📡 Obteniendo información de paginación para ${username}...`);
-
-    const initialResponse = await fetch(initialUrl);
-    if (!initialResponse.ok) {
-      throw new ApiError(
-        `Error HTTP: ${initialResponse.status}`,
-        initialResponse.status,
-        initialUrl
-      );
-    }
-
-    const initialData: SyncadResponse = await initialResponse.json();
-    const totalPages = initialData.total_pages;
-
-    console.log(`📄 Total de páginas disponibles: ${totalPages}`);
     console.log(
       `🔄 Comenzando navegación desde la ÚLTIMA página (${totalPages}) hacia la primera`
     );
 
-    const validPowerUps: PowerUpTransaction[] = [];
-    const processedTxIds = new Set<string>(); // Para evitar duplicados
+    const allValidPowerUps: PowerUpTransaction[] = [];
+    const processedTxIds = new Set<string>();
     let shouldContinue = true;
 
-    // Comenzamos desde la última página y vamos hacia atrás
     for (
       let currentPage = totalPages;
       currentPage >= 1 && shouldContinue;
       currentPage--
     ) {
-      const pageParam = currentPage === 1 ? "" : `&page=${currentPage}`;
-      const url = `https://api.syncad.com/hafah-api/accounts/${username}/operations?${baseParams}${pageParam}`;
-
-      console.log(
-        `📡 ⬅️ Consultando página ${currentPage}/${totalPages} (navegando hacia atrás) para ${username}...`
+      const pageResult = await processPowerUpPage(
+        username,
+        currentPage,
+        totalPages,
+        apiParams,
+        dateRange,
+        extendedRange,
+        processedTxIds
       );
 
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new ApiError(
-          `Error HTTP: ${response.status}`,
-          response.status,
-          url
-        );
-      }
+      allValidPowerUps.push(...pageResult.validPowerUps);
+      shouldContinue = pageResult.shouldContinue;
 
-      const data: SyncadResponse = await response.json();
-      console.log(
-        `📊 Página ${currentPage}/${totalPages}: ${data.operations_result.length} operaciones encontradas para ${username}`
-      );
-
-      // Buscar TODAS las operaciones transfer_to_vesting dentro del rango
-      for (const operation of data.operations_result) {
-        if (operation.op_type_id === OperationType.TRANSFER_TO_VESTING) {
-          // Asegurar que el timestamp tenga la Z para UTC
-          const timestampUTC = operation.timestamp.endsWith("Z")
-            ? operation.timestamp
-            : operation.timestamp + "Z";
-          const opDate = parseISO(timestampUTC);
-
-          const formattedOpDate = formatUTC(
-            opDate,
-            "yyyy-MM-dd HH:mm:ss 'UTC'"
-          );
-          const amount = operation.op.value.hive_vested?.amount || "N/A";
-
-          // Extraer el valor numérico del amount y dividir entre 1000 para obtener HIVE
-          const amountValue = parseFloat(amount) / 1000;
-          const amountFormatted = amountValue.toFixed(3);
-
-          // Early exit: Si encontramos una operación ANTERIOR al rango extendido,
-          // podemos detener la búsqueda porque las páginas anteriores serán aún más antiguas
-          // Usamos fromBlockDate (con margen) para el early exit
-          if (opDate < fromBlockDate) {
-            console.log(
-              `⏸️ ${username} - Operación anterior al rango extendido encontrada (${formattedOpDate}). Deteniendo búsqueda en página ${currentPage}.`
-            );
-            shouldContinue = false;
-            break;
-          }
-
-          // Validar que esté dentro del rango de fechas EXACTO (sin márgenes)
-          // El margen solo se usa para el filtrado de la API, la validación es precisa
-          if (
-            isWithinInterval(opDate, {
-              start: dateRange.startDate,
-              end: dateRange.endDate,
-            })
-          ) {
-            // Verificar si el txId ya fue procesado (evitar duplicados)
-            if (processedTxIds.has(operation.trx_id)) {
-              console.log(
-                `⚠️ ${username} - Transaction duplicada ignorada: ${operation.trx_id}`
-              );
-              continue;
-            }
-
-            console.log(`⚡ ${username} - Power Up encontrado:`, {
-              fecha: formattedOpDate,
-              fechaISO: opDate.toISOString(),
-              unix: opDate.getTime(),
-              monto: `${amountFormatted} HIVE`,
-              txId: operation.trx_id,
-            });
-
-            // Validar cantidad mínima individual
-            if (minPowerUp > 0 && amountValue < minPowerUp) {
-              console.log(
-                `⚠️ ${username} - Power Up de ${amountFormatted} HIVE es menor al mínimo (${minPowerUp} HIVE), pero se incluirá en el total`
-              );
-            }
-
-            // Marcar txId como procesado
-            processedTxIds.add(operation.trx_id);
-
-            // Agregar a la lista de power ups válidos
-            validPowerUps.push({
-              date: formattedOpDate,
-              amount: amountFormatted,
-              txId: operation.trx_id,
-            });
-          }
-        }
-      }
-
-      // Protección contra loops infinitos
       if (totalPages - currentPage + 1 > ApiConfig.MAX_PAGES) {
         console.warn(
           `⚠️ Se alcanzó el límite de ${ApiConfig.MAX_PAGES} páginas procesadas para ${username}`
@@ -387,59 +500,16 @@ async function hasPowerUpInRange(
       }
     }
 
-    // Log de transacciones procesadas
     console.log(
-      `📊 ${username} - Total transacciones únicas procesadas: ${validPowerUps.length}`
+      `📊 ${username} - Total transacciones únicas procesadas: ${allValidPowerUps.length}`
     );
 
-    // Si encontramos power ups, calcular el total
-    if (validPowerUps.length > 0) {
-      const totalAmount = validPowerUps.reduce((sum, pu) => {
-        return sum + parseFloat(pu.amount);
-      }, 0);
-
-      console.log(
-        `✅ ${username} - ${
-          validPowerUps.length
-        } Power Up(s) encontrado(s). Total: ${totalAmount.toFixed(3)} HIVE`
-      );
-      console.log(
-        `📅 Rango: ${formatUTC(
-          dateRange.startDate,
-          "yyyy-MM-dd HH:mm:ss 'UTC'"
-        )} - ${formatUTC(dateRange.endDate, "yyyy-MM-dd HH:mm:ss 'UTC'")}`
-      );
-      console.log(`💰 Filtro mínimo: ${minPowerUp} HIVE`);
-
-      // Validar que el total cumpla con el mínimo
-      if (minPowerUp > 0 && totalAmount < minPowerUp) {
-        console.log(
-          `❌ ${username} - Total de ${totalAmount.toFixed(
-            3
-          )} HIVE es menor al mínimo requerido (${minPowerUp} HIVE)`
-        );
-        return { hasPowerUp: false };
-      }
-
-      console.log(`✅ ${username} - Power Up VÁLIDO! Total cumple el mínimo.`);
-
-      return {
-        hasPowerUp: true,
-        powerUpDate: validPowerUps[0].date, // Primera transacción
-        powerUpAmount: validPowerUps[0].amount, // Primera transacción (ya está dividido)
-        powerUpTxId: validPowerUps[0].txId, // Primera transacción
-        powerUpTransactions: validPowerUps, // Todas las transacciones (ya divididas)
-        totalPowerUp: totalAmount.toFixed(3), // Total sumado
-      };
-    }
-
-    console.log(
-      `🚫 ${username} - No se encontró Power Up en el rango especificado`
+    return calculatePowerUpResult(
+      allValidPowerUps,
+      minPowerUp,
+      username,
+      dateRange
     );
-    console.log(
-      `🚫 ${username} - No se encontró Power Up en el rango especificado`
-    );
-    return { hasPowerUp: false };
   } catch (err) {
     console.error(`❌ Error consultando API Syncad para ${username}:`, err);
     if (err instanceof ApiError) {
@@ -491,7 +561,8 @@ export async function getChallengeParticipants(
   permlink: string,
   dateRange: DateRange,
   onProgress?: ProgressCallback,
-  minPowerUp: number = 10
+  minPowerUp: number = 10,
+  requireImages: boolean = false
 ): Promise<ChallengeAnalysis> {
   try {
     const comments = await getComments(author, permlink);
@@ -534,57 +605,66 @@ export async function getChallengeParticipants(
         let powerUpDate: string | undefined;
         let reason = "";
 
-        if (hasImages) {
-          console.log(
-            `🖼️ ${comment.author} - Comentario con ${
-              validImages.length
-            } imagen(es) válida(s) de ${(image || []).length} total(es)`
-          );
-
-          // Verificar si hizo power up en el rango de fechas usando API Syncad
-          const powerUpResult = await hasPowerUpInRange(
-            comment.author,
-            dateRange,
-            minPowerUp
-          );
-          hasPowerUp = powerUpResult.hasPowerUp;
-          powerUpDate = powerUpResult.powerUpDate;
-          const powerUpAmount = powerUpResult.powerUpAmount;
-          const powerUpTxId = powerUpResult.powerUpTxId;
-          const powerUpTransactions = powerUpResult.powerUpTransactions;
-          const totalPowerUp = powerUpResult.totalPowerUp;
-
-          if (hasPowerUp) {
-            console.log(`🎉 ${comment.author} - CUMPLE TODOS LOS REQUISITOS!`);
-            validUsers.push({
-              name: comment.author,
-              images: validImages,
-              powerUpDate,
-              powerUpAmount,
-              powerUpTxId,
-              powerUpTransactions,
-              totalPowerUp,
-              hasImages: true,
-              hasPowerUp: true,
-            });
-          } else {
-            reason = "No hizo Power Up en el rango de fechas";
-            console.log(`❌ ${comment.author} - ${reason}`);
-            invalidUsers.push({
-              name: comment.author,
-              images: validImages,
-              hasImages: true,
-              hasPowerUp: false,
-              reason,
-            });
-          }
-        } else {
+        // Si requireImages=true, verificar imágenes primero
+        if (requireImages && !hasImages) {
           reason = "No incluye imágenes válidas en el comentario";
           console.log(`📷 ${comment.author} - ${reason}`);
           invalidUsers.push({
             name: comment.author,
             images: [],
             hasImages: false,
+            hasPowerUp: false,
+            reason,
+          });
+          continue;
+        }
+
+        // Si llegamos aquí, o no se requieren imágenes, o sí tiene imágenes
+        if (hasImages) {
+          console.log(
+            `🖼️ ${comment.author} - Comentario con ${
+              validImages.length
+            } imagen(es) válida(s) de ${(image || []).length} total(es)`
+          );
+        } else {
+          console.log(
+            `⚡ ${comment.author} - Sin imágenes, verificando solo Power Up`
+          );
+        }
+
+        // Verificar si hizo power up en el rango de fechas usando API Syncad
+        const powerUpResult = await hasPowerUpInRange(
+          comment.author,
+          dateRange,
+          minPowerUp
+        );
+        hasPowerUp = powerUpResult.hasPowerUp;
+        powerUpDate = powerUpResult.powerUpDate;
+        const powerUpAmount = powerUpResult.powerUpAmount;
+        const powerUpTxId = powerUpResult.powerUpTxId;
+        const powerUpTransactions = powerUpResult.powerUpTransactions;
+        const totalPowerUp = powerUpResult.totalPowerUp;
+
+        if (hasPowerUp) {
+          console.log(`🎉 ${comment.author} - CUMPLE TODOS LOS REQUISITOS!`);
+          validUsers.push({
+            name: comment.author,
+            images: validImages,
+            powerUpDate,
+            powerUpAmount,
+            powerUpTxId,
+            powerUpTransactions,
+            totalPowerUp,
+            hasImages,
+            hasPowerUp: true,
+          });
+        } else {
+          reason = "No hizo Power Up en el rango de fechas";
+          console.log(`❌ ${comment.author} - ${reason}`);
+          invalidUsers.push({
+            name: comment.author,
+            images: validImages,
+            hasImages,
             hasPowerUp: false,
             reason,
           });
@@ -601,25 +681,61 @@ export async function getChallengeParticipants(
       }
     }
 
+    // Deduplicar usuarios: consolidar múltiples comentarios del mismo usuario
+    const deduplicateUsers = (users: User[]): User[] => {
+      const userMap = new Map<string, User>();
+
+      for (const user of users) {
+        const existingUser = userMap.get(user.name);
+
+        if (existingUser) {
+          // Usuario ya existe, consolidar información
+          const allImages = [...new Set([...existingUser.images, ...user.images])]; // Eliminar imágenes duplicadas
+          const commentCount = (existingUser.commentCount || 1) + 1;
+
+          userMap.set(user.name, {
+            ...existingUser,
+            images: allImages,
+            commentCount,
+            hasImages: existingUser.hasImages || user.hasImages, // Si alguno tiene imágenes, marcar como true
+          });
+        } else {
+          // Primera vez que vemos este usuario
+          userMap.set(user.name, {
+            ...user,
+            commentCount: 1,
+          });
+        }
+      }
+
+      return Array.from(userMap.values());
+    };
+
+    const deduplicatedValidUsers = deduplicateUsers(validUsers);
+    const deduplicatedInvalidUsers = deduplicateUsers(invalidUsers);
+
+    // Eliminar duplicados de ignoredUsers
+    const uniqueIgnoredUsers = [...new Set(ignoredUsers)];
+
     const analysis: ChallengeAnalysis = {
-      validUsers,
-      invalidUsers,
-      ignoredUsers,
+      validUsers: deduplicatedValidUsers,
+      invalidUsers: deduplicatedInvalidUsers,
+      ignoredUsers: uniqueIgnoredUsers,
       totalComments: comments.length,
     };
 
     console.log(`\n✅ ANÁLISIS COMPLETADO:`);
     console.log(`📊 Total comentarios: ${analysis.totalComments}`);
-    console.log(`✅ Usuarios válidos: ${analysis.validUsers.length}`);
-    console.log(`❌ Usuarios inválidos: ${analysis.invalidUsers.length}`);
+    console.log(`✅ Usuarios válidos únicos: ${analysis.validUsers.length}`);
+    console.log(`❌ Usuarios inválidos únicos: ${analysis.invalidUsers.length}`);
     console.log(`🤖 Cuentas ignoradas: ${analysis.ignoredUsers.length}`);
     console.log(
       `\n👥 Usuarios válidos:`,
-      analysis.validUsers.map((u) => u.name)
+      analysis.validUsers.map((u) => `${u.name}${u.commentCount && u.commentCount > 1 ? ` (${u.commentCount} comentarios)` : ''}`)
     );
     console.log(
       `\n❌ Usuarios inválidos:`,
-      analysis.invalidUsers.map((u) => `${u.name} (${u.reason})`)
+      analysis.invalidUsers.map((u) => `${u.name} (${u.reason})${u.commentCount && u.commentCount > 1 ? ` - ${u.commentCount} comentarios` : ''}`)
     );
 
     return analysis;

@@ -233,10 +233,25 @@ const UserList: React.FC<UserListProps> = ({ analysis }) => {
     );
   }
 
+  // Calcular total de Hive Power acumulado
+  const calculateTotalHivePower = (): string => {
+    const total = analysis.validUsers.reduce((sum, user) => {
+      if (user.totalPowerUp) {
+        return sum + parseFloat(user.totalPowerUp);
+      } else if (user.powerUpAmount) {
+        return sum + getHivePowerValue(user.powerUpAmount);
+      }
+      return sum;
+    }, 0);
+    return total.toFixed(3);
+  };
+
+  const totalHP = calculateTotalHivePower();
+
   return (
     <div className="space-y-4">
       {/* Resumen */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 p-4 bg-terminal-green/5 rounded border border-terminal-green/20">
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 p-4 bg-terminal-green/5 rounded border border-terminal-green/20">
         <div className="text-center">
           <div className="text-lg font-mono text-terminal-green">{analysis.totalComments}</div>
           <div className="text-xs text-terminal-green/70">Total comentarios</div>
@@ -252,6 +267,10 @@ const UserList: React.FC<UserListProps> = ({ analysis }) => {
         <div className="text-center">
           <div className="text-lg font-mono text-yellow-400">{analysis.ignoredUsers.length}</div>
           <div className="text-xs text-terminal-green/70">Ignorados</div>
+        </div>
+        <div className="text-center bg-white/5 rounded px-2">
+          <div className="text-lg font-mono text-green-400 font-bold">{totalHP} HP</div>
+          <div className="text-xs text-terminal-green/70">Total HP</div>
         </div>
       </div>
 
@@ -375,8 +394,15 @@ const UserList: React.FC<UserListProps> = ({ analysis }) => {
                 <div className="flex items-center gap-3">
                   <User className="w-4 h-4 text-green-400 flex-shrink-0" />
                   <div className="flex-1 min-w-0">
-                    <div className="font-mono text-sm text-green-400">
-                      @{user.name}
+                    <div className="flex items-center gap-2">
+                      <div className="font-mono text-sm text-green-400">
+                        @{user.name}
+                      </div>
+                      {user.commentCount && user.commentCount > 1 && (
+                        <span className="text-xs text-green-400/50 font-mono bg-green-400/10 px-1.5 py-0.5 rounded">
+                          {user.commentCount} comentarios
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-4 mt-1">
                       <div className="flex items-center gap-1">
@@ -388,9 +414,9 @@ const UserList: React.FC<UserListProps> = ({ analysis }) => {
                       {user.powerUpDate && (
                         <div className="flex-1">
                           <div className="flex items-center gap-2">
-                            <div className="flex items-center gap-1">
-                              <Zap className="w-3 h-3 text-green-400/70" />
-                              <span className="text-xs text-green-400/70 font-mono">
+                            <div className="flex items-center gap-1 bg-white/10 px-2 py-1 rounded">
+                              <Zap className="w-3 h-3 text-green-400" />
+                              <span className="text-xs text-green-400 font-mono font-semibold">
                                 {user.totalPowerUp ? `Total: ${user.totalPowerUp} HP` : `${formatHivePower(user.powerUpAmount)}`}
                               </span>
                             </div>
@@ -467,8 +493,15 @@ const UserList: React.FC<UserListProps> = ({ analysis }) => {
                   <div className="flex items-center gap-3">
                     <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
                     <div className="flex-1 min-w-0">
-                      <div className="font-mono text-sm text-red-400">
-                        @{user.name}
+                      <div className="flex items-center gap-2">
+                        <div className="font-mono text-sm text-red-400">
+                          @{user.name}
+                        </div>
+                        {user.commentCount && user.commentCount > 1 && (
+                          <span className="text-xs text-red-400/50 font-mono bg-red-400/10 px-1.5 py-0.5 rounded">
+                            {user.commentCount} comentarios
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-4 mt-1">
                         {user.hasImages && (

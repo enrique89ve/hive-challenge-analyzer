@@ -9,6 +9,7 @@ export interface User {
   readonly hasImages: boolean;
   readonly hasPowerUp: boolean;
   readonly reason?: string; // Razón por la que no cumple
+  readonly commentCount?: number; // Número de comentarios realizados
 }
 
 export interface PowerUpTransaction {
@@ -49,8 +50,27 @@ export interface PostInfo {
 
 export interface FilterOptions {
   readonly minPowerUp: number;
+  readonly requireImages: boolean;
 }
 
 export interface ProgressCallback {
   (current: number, total: number): void;
+}
+
+// Tipos auxiliares para procesamiento de Power Up
+export interface ExtendedDateRange {
+  readonly fromBlock: string;
+  readonly toBlock: string;
+  readonly fromBlockDate: Date;
+  readonly toBlockDate: Date;
+}
+
+export interface PowerUpPageResult {
+  readonly validPowerUps: PowerUpTransaction[];
+  readonly shouldContinue: boolean;
+}
+
+export interface SyncadApiParams {
+  readonly baseUrl: string;
+  readonly baseParams: string;
 }
